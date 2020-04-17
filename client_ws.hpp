@@ -367,7 +367,12 @@ namespace SimpleWeb {
       }
       else {
         parsed_host_port.first = host_port.substr(0, host_end);
-        parsed_host_port.second = static_cast<unsigned short>(stoul(host_port.substr(host_end + 1)));
+        try {
+          parsed_host_port.second = static_cast<unsigned short>(stoul(host_port.substr(host_end + 1)));
+        }
+        catch(...) {
+          parsed_host_port.second = default_port;
+        }
       }
       return parsed_host_port;
     }
