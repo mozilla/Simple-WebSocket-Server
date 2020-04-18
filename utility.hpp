@@ -3,10 +3,40 @@
 
 #include "status_code.hpp"
 #include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <ctime>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
+
+#ifndef DEPRECATED
+#if defined(__GNUC__) || defined(__clang__)
+#define DEPRECATED __attribute__((deprecated))
+#elif defined(_MSC_VER)
+#define DEPRECATED __declspec(deprecated)
+#else
+#define DEPRECATED
+#endif
+#endif
+
+#if __cplusplus > 201402L || _MSVC_LANG > 201402L
+#include <string_view>
+namespace SimpleWeb {
+  using string_view = std::string_view;
+}
+#elif !defined(USE_STANDALONE_ASIO)
+#include <boost/utility/string_ref.hpp>
+namespace SimpleWeb {
+  using string_view = boost::string_ref;
+}
+#else
+namespace SimpleWeb {
+  using string_view = const std::string &;
+}
+#endif
 
 namespace SimpleWeb {
   inline bool case_insensitive_equal(const std::string &str1, const std::string &str2) noexcept {
@@ -46,10 +76,8 @@ namespace SimpleWeb {
       result.reserve(value.size()); // Minimum size of result
 
       for(auto &chr : value) {
-        if(chr == ' ')
-          result += '+';
-        else if(chr == '!' || chr == '#' || chr == '$' || (chr >= '&' && chr <= ',') || (chr >= '/' && chr <= ';') || chr == '=' || chr == '?' || chr == '@' || chr == '[' || chr == ']')
-          result += std::string("%") + hex_chars[chr >> 4] + hex_chars[chr & 15];
+        if(!((chr >= '0' && chr <= '9') || (chr >= 'A' && chr <= 'Z') || (chr >= 'a' && chr <= 'z') || chr == '-' || chr == '.' || chr == '_' || chr == '~'))
+          result += std::string("%") + hex_chars[static_cast<unsigned char>(chr) >> 4] + hex_chars[static_cast<unsigned char>(chr) & 15];
         else
           result += chr;
       }
@@ -136,22 +164,17 @@ namespace SimpleWeb {
 
   class HttpHeader {
   public:
-    /// Parse header fields
+    /// Parse header fields from stream
     static CaseInsensitiveMultimap parse(std::istream &stream) noexcept {
       CaseInsensitiveMultimap result;
       std::string line;
-      getline(stream, line);
       std::size_t param_end;
-      while((param_end = line.find(':')) != std::string::npos) {
+      while(getline(stream, line) && (param_end = line.find(':')) != std::string::npos) {
         std::size_t value_start = param_end + 1;
-        if(value_start < line.size()) {
-          if(line[value_start] == ' ')
-            value_start++;
-          if(value_start < line.size())
-            result.emplace(line.substr(0, param_end), line.substr(value_start, line.size() - value_start - 1));
-        }
-
-        getline(stream, line);
+        while(value_start + 1 < line.size() && line[value_start] == ' ')
+          ++value_start;
+        if(value_start < line.size())
+          result.emplace(line.substr(0, param_end), line.substr(value_start, line.size() - value_start - (line.back() == '\r' ? 1 : 0)));
       }
       return result;
     }
@@ -160,36 +183,37 @@ namespace SimpleWeb {
     public:
       class SemicolonSeparatedAttributes {
       public:
-        /// Parse Set-Cookie or Content-Disposition header field value. Attribute values are percent-decoded.
-        static CaseInsensitiveMultimap parse(const std::string &str) {
+        /// Parse Set-Cookie or Content-Disposition from given header field value.
+        /// Attribute values are percent-decoded.
+        static CaseInsensitiveMultimap parse(const std::string &value) {
           CaseInsensitiveMultimap result;
 
           std::size_t name_start_pos = std::string::npos;
           std::size_t name_end_pos = std::string::npos;
           std::size_t value_start_pos = std::string::npos;
-          for(std::size_t c = 0; c < str.size(); ++c) {
+          for(std::size_t c = 0; c < value.size(); ++c) {
             if(name_start_pos == std::string::npos) {
-              if(str[c] != ' ' && str[c] != ';')
+              if(value[c] != ' ' && value[c] != ';')
                 name_start_pos = c;
             }
             else {
               if(name_end_pos == std::string::npos) {
-                if(str[c] == ';') {
-                  result.emplace(str.substr(name_start_pos, c - name_start_pos), std::string());
+                if(value[c] == ';') {
+                  result.emplace(value.substr(name_start_pos, c - name_start_pos), std::string());
                   name_start_pos = std::string::npos;
                 }
-                else if(str[c] == '=')
+                else if(value[c] == '=')
                   name_end_pos = c;
               }
               else {
                 if(value_start_pos == std::string::npos) {
-                  if(str[c] == '"' && c + 1 < str.size())
+                  if(value[c] == '"' && c + 1 < value.size())
                     value_start_pos = c + 1;
                   else
                     value_start_pos = c;
                 }
-                else if(str[c] == '"' || str[c] == ';') {
-                  result.emplace(str.substr(name_start_pos, name_end_pos - name_start_pos), Percent::decode(str.substr(value_start_pos, c - value_start_pos)));
+                else if(value[c] == '"' || value[c] == ';') {
+                  result.emplace(value.substr(name_start_pos, name_end_pos - name_start_pos), Percent::decode(value.substr(value_start_pos, c - value_start_pos)));
                   name_start_pos = std::string::npos;
                   name_end_pos = std::string::npos;
                   value_start_pos = std::string::npos;
@@ -199,12 +223,12 @@ namespace SimpleWeb {
           }
           if(name_start_pos != std::string::npos) {
             if(name_end_pos == std::string::npos)
-              result.emplace(str.substr(name_start_pos), std::string());
+              result.emplace(value.substr(name_start_pos), std::string());
             else if(value_start_pos != std::string::npos) {
-              if(str.back() == '"')
-                result.emplace(str.substr(name_start_pos, name_end_pos - name_start_pos), Percent::decode(str.substr(value_start_pos, str.size() - 1)));
+              if(value.back() == '"')
+                result.emplace(value.substr(name_start_pos, name_end_pos - name_start_pos), Percent::decode(value.substr(value_start_pos, value.size() - 1)));
               else
-                result.emplace(str.substr(name_start_pos, name_end_pos - name_start_pos), Percent::decode(str.substr(value_start_pos)));
+                result.emplace(value.substr(name_start_pos, name_end_pos - name_start_pos), Percent::decode(value.substr(value_start_pos)));
             }
           }
 
@@ -212,17 +236,25 @@ namespace SimpleWeb {
         }
       };
     };
-  }; // namespace SimpleWeb
+  };
 
   class RequestMessage {
   public:
-    /// Parse request line and header fields
+    /** Parse request line and header fields from a request stream.
+     *
+     * @param[in]  stream       Stream to parse.
+     * @param[out] method       HTTP method.
+     * @param[out] path         Path from request URI.
+     * @param[out] query_string Query string from request URI.
+     * @param[out] version      HTTP version.
+     * @param[out] header       Header fields.
+     *
+     * @return True if stream is parsed successfully, false if not.
+     */
     static bool parse(std::istream &stream, std::string &method, std::string &path, std::string &query_string, std::string &version, CaseInsensitiveMultimap &header) noexcept {
-      header.clear();
       std::string line;
-      getline(stream, line);
       std::size_t method_end;
-      if((method_end = line.find(' ')) != std::string::npos) {
+      if(getline(stream, line) && (method_end = line.find(' ')) != std::string::npos) {
         method = line.substr(0, method_end);
 
         std::size_t query_start = std::string::npos;
@@ -265,19 +297,25 @@ namespace SimpleWeb {
 
   class ResponseMessage {
   public:
-    /// Parse status line and header fields
+    /** Parse status line and header fields from a response stream.
+     *
+     * @param[in]  stream      Stream to parse.
+     * @param[out] version     HTTP version.
+     * @param[out] status_code HTTP status code.
+     * @param[out] header      Header fields.
+     *
+     * @return True if stream is parsed successfully, false if not.
+     */
     static bool parse(std::istream &stream, std::string &version, std::string &status_code, CaseInsensitiveMultimap &header) noexcept {
-      header.clear();
       std::string line;
-      getline(stream, line);
-      std::size_t version_end = line.find(' ');
-      if(version_end != std::string::npos) {
+      std::size_t version_end;
+      if(getline(stream, line) && (version_end = line.find(' ')) != std::string::npos) {
         if(5 < line.size())
           version = line.substr(5, version_end - 5);
         else
           return false;
         if((version_end + 1) < line.size())
-          status_code = line.substr(version_end + 1, line.size() - (version_end + 1) - 1);
+          status_code = line.substr(version_end + 1, line.size() - (version_end + 1) - (line.back() == '\r' ? 1 : 0));
         else
           return false;
 
@@ -286,6 +324,90 @@ namespace SimpleWeb {
       else
         return false;
       return true;
+    }
+  };
+
+  /// Date class working with formats specified in RFC 7231 Date/Time Formats
+  class Date {
+  public:
+    /// Returns the given std::chrono::system_clock::time_point as a string with the following format: Wed, 31 Jul 2019 11:34:23 GMT.
+    static std::string to_string(const std::chrono::system_clock::time_point time_point) noexcept {
+      static std::string result_cache;
+      static std::chrono::system_clock::time_point last_time_point;
+
+      static std::mutex mutex;
+      std::lock_guard<std::mutex> lock(mutex);
+
+      if(std::chrono::duration_cast<std::chrono::seconds>(time_point - last_time_point).count() == 0 && !result_cache.empty())
+        return result_cache;
+
+      last_time_point = time_point;
+
+      std::string result;
+      result.reserve(29);
+
+      auto time = std::chrono::system_clock::to_time_t(time_point);
+      tm tm;
+#if defined(_MSC_VER) || defined(__MINGW32__)
+      if(gmtime_s(&tm, &time) != 0)
+        return {};
+      auto gmtime = &tm;
+#else
+      auto gmtime = gmtime_r(&time, &tm);
+      if(!gmtime)
+        return {};
+#endif
+
+      switch(gmtime->tm_wday) {
+      case 0: result += "Sun, "; break;
+      case 1: result += "Mon, "; break;
+      case 2: result += "Tue, "; break;
+      case 3: result += "Wed, "; break;
+      case 4: result += "Thu, "; break;
+      case 5: result += "Fri, "; break;
+      case 6: result += "Sat, "; break;
+      }
+
+      result += gmtime->tm_mday < 10 ? '0' : static_cast<char>(gmtime->tm_mday / 10 + 48);
+      result += static_cast<char>(gmtime->tm_mday % 10 + 48);
+
+      switch(gmtime->tm_mon) {
+      case 0: result += " Jan "; break;
+      case 1: result += " Feb "; break;
+      case 2: result += " Mar "; break;
+      case 3: result += " Apr "; break;
+      case 4: result += " May "; break;
+      case 5: result += " Jun "; break;
+      case 6: result += " Jul "; break;
+      case 7: result += " Aug "; break;
+      case 8: result += " Sep "; break;
+      case 9: result += " Oct "; break;
+      case 10: result += " Nov "; break;
+      case 11: result += " Dec "; break;
+      }
+
+      auto year = gmtime->tm_year + 1900;
+      result += static_cast<char>(year / 1000 + 48);
+      result += static_cast<char>((year / 100) % 10 + 48);
+      result += static_cast<char>((year / 10) % 10 + 48);
+      result += static_cast<char>(year % 10 + 48);
+      result += ' ';
+
+      result += gmtime->tm_hour < 10 ? '0' : static_cast<char>(gmtime->tm_hour / 10 + 48);
+      result += static_cast<char>(gmtime->tm_hour % 10 + 48);
+      result += ':';
+
+      result += gmtime->tm_min < 10 ? '0' : static_cast<char>(gmtime->tm_min / 10 + 48);
+      result += static_cast<char>(gmtime->tm_min % 10 + 48);
+      result += ':';
+
+      result += gmtime->tm_sec < 10 ? '0' : static_cast<char>(gmtime->tm_sec / 10 + 48);
+      result += static_cast<char>(gmtime->tm_sec % 10 + 48);
+
+      result += " GMT";
+
+      result_cache = result;
+      return result;
     }
   };
 } // namespace SimpleWeb
@@ -308,9 +430,9 @@ namespace SimpleWeb {
 #endif
 
 namespace SimpleWeb {
-  /// Makes it possible to for instance cancel Asio handlers without stopping asio::io_service
+  /// Makes it possible to for instance cancel Asio handlers without stopping asio::io_service.
   class ScopeRunner {
-    /// Scope count that is set to -1 if scopes are to be canceled
+    /// Scope count that is set to -1 if scopes are to be canceled.
     std::atomic<long> count;
 
   public:
@@ -329,7 +451,8 @@ namespace SimpleWeb {
 
     ScopeRunner() noexcept : count(0) {}
 
-    /// Returns nullptr if scope should be exited, or a shared lock otherwise
+    /// Returns nullptr if scope should be exited, or a shared lock otherwise.
+    /// The shared lock ensures that a potential destructor call is delayed until all locks are released.
     std::unique_ptr<SharedLock> continue_lock() noexcept {
       long expected = count;
       while(expected >= 0 && !count.compare_exchange_weak(expected, expected + 1))
@@ -341,7 +464,7 @@ namespace SimpleWeb {
         return std::unique_ptr<SharedLock>(new SharedLock(count));
     }
 
-    /// Blocks until all shared locks are released, then prevents future shared locks
+    /// Blocks until all shared locks are released, then prevents future shared locks.
     void stop() noexcept {
       long expected = 0;
       while(!count.compare_exchange_weak(expected, -1)) {

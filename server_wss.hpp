@@ -1,5 +1,5 @@
-#ifndef SERVER_WSS_HPP
-#define SERVER_WSS_HPP
+#ifndef SIMPLE_WEB_SERVER_WSS_HPP
+#define SIMPLE_WEB_SERVER_WSS_HPP
 
 #include "server_ws.hpp"
 #include <algorithm>
@@ -20,9 +20,16 @@ namespace SimpleWeb {
     bool set_session_id_context = false;
 
   public:
-    SocketServer(const std::string &cert_file, const std::string &private_key_file, const std::string &verify_file = std::string())
+    /**
+     * Constructs a server object.
+     *
+     * @param certification_file If non-empty, sends the given certification file to client.
+     * @param private_key_file   Specifies the file containing the private key for certification_file.
+     * @param verify_file        If non-empty, use this certificate authority file to perform verification of client's certificate and hostname according to RFC 2818.
+     */
+    SocketServer(const std::string &certification_file, const std::string &private_key_file, const std::string &verify_file = std::string())
         : SocketServerBase<WSS>(443), context(asio::ssl::context::tlsv12) {
-      context.use_certificate_chain_file(cert_file);
+      context.use_certificate_chain_file(certification_file);
       context.use_private_key_file(private_key_file, asio::ssl::context::pem);
 
       if(verify_file.size() > 0) {
@@ -42,7 +49,7 @@ namespace SimpleWeb {
         auto session_id_context = std::to_string(acceptor->local_endpoint().port()) + ':';
         session_id_context.append(config.address.rbegin(), config.address.rend());
         SSL_CTX_set_session_id_context(context.native_handle(), reinterpret_cast<const unsigned char *>(session_id_context.data()),
-                                       std::min<std::size_t>(session_id_context.size(), SSL_MAX_SSL_SESSION_ID_LENGTH));
+                                       static_cast<unsigned int>(std::min<std::size_t>(session_id_context.size(), SSL_MAX_SSL_SESSION_ID_LENGTH)));
       }
     }
 
@@ -54,7 +61,7 @@ namespace SimpleWeb {
         if(!lock)
           return;
         // Immediately start accepting a new connection (if io_service hasn't been stopped)
-        if(ec != asio::error::operation_aborted)
+        if(ec != error::operation_aborted)
           accept();
 
         if(!ec) {
@@ -63,10 +70,10 @@ namespace SimpleWeb {
 
           connection->set_timeout(config.timeout_request);
           connection->socket->async_handshake(asio::ssl::stream_base::server, [this, connection](const error_code &ec) {
+            connection->cancel_timeout();
             auto lock = connection->handler_runner->continue_lock();
             if(!lock)
               return;
-            connection->cancel_timeout();
             if(!ec)
               read_handshake(connection);
           });
@@ -76,4 +83,4 @@ namespace SimpleWeb {
   };
 } // namespace SimpleWeb
 
-#endif /* SERVER_WSS_HPP */
+#endif /* SIMPLE_WEB_SERVER_WSS_HPP */
